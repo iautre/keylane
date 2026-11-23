@@ -80,7 +80,12 @@ func registerWeb(r *gin.Engine) {
 		slog.Error("missing embedded web build", "error", err)
 		os.Exit(1)
 	}
-	r.StaticFS("/assets", http.FS(dist))
+	assets, err := fs.Sub(dist, "assets")
+	if err != nil {
+		slog.Error("missing embedded web assets", "error", err)
+		os.Exit(1)
+	}
+	r.StaticFS("/assets", http.FS(assets))
 	r.NoRoute(func(c *gin.Context) {
 		if c.Request.Method == http.MethodGet && (c.Request.URL.Path == "/" || strings.Contains(c.GetHeader("Accept"), "text/html")) {
 			index, err := fs.ReadFile(dist, "index.html")
