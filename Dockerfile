@@ -11,7 +11,7 @@ RUN apk add --no-cache git
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=web-build /web/dist ./internal/webui/dist
+COPY --from=web-build /internal/webui/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/keylane ./cmd/keylane
 
 FROM alpine:3.21

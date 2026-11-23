@@ -81,4 +81,4 @@ GitHub Actions builds multi-architecture images for `linux/amd64` and `linux/arm
 
 Before the first push to `main`, add a Docker Hub access token as the repository Actions secret `DOCKERHUB_TOKEN`. Images are published to `docker.io/iautre/keylane`.
 
-CNB builds multi-architecture images for `linux/amd64` and `linux/arm64` on pushes to `main`, publishing both a numbered beta tag (from `CNB_BUILD_ID`) and `latest` to its same-name Docker artifact at `${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}`. The CNB Docker service handles authentication to its artifact registry. GitHub Actions publishes numbered beta tags to Docker Hub independently.
+CNB builds multi-architecture images for `linux/amd64` and `linux/arm64` on pushes to `main`, publishing both a numbered beta tag (from the main-branch commit count) and `latest` to its same-name Docker artifact at `${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}`. The CNB Docker service handles authentication to its artifact registry. GitHub Actions publishes numbered beta tags to Docker Hub independently.
