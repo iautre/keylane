@@ -1,0 +1,9 @@
+.env
+data/
+web/node_modules/
+web/dist/
+*.db
+*.db-shm
+*.db-wal
+/keylane
+*.tsbuildinfo

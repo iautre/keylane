@@ -1,0 +1,13 @@
+services:
+  keylane:
+    image: ${KEYLANE_IMAGE:-docker.cnb.cool/autre/keylane:latest}
+    container_name: keylane
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_ENABLED: "false"
+      HTTP_SERVER_ADDR: ":8080"
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ./data:/data

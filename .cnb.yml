@@ -1,0 +1,17 @@
+main:
+  push:
+    - services:
+        - docker
+      stages:
+        - name: Build and push beta and latest images
+          script: |
+            case "$CNB_BUILD_ID" in
+              ''|*[!0-9]*) echo "CNB_BUILD_ID must be numeric" >&2; exit 1 ;;
+            esac
+            tag="beta$(printf '%05d' "$CNB_BUILD_ID")"
+            image="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+            docker buildx build \
+              --platform linux/amd64,linux/arm64 \
+              --tag "${image}:${tag}" \
+              --tag "${image}:latest" \
+              --push .
