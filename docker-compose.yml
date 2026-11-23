@@ -9,7 +9,7 @@ services:
       DATABASE_PATH: /data/keylane.db
       HTTP_SERVER_ADDR: ":8080"
     ports:
-      - "${PORT:-8080}:8080"
+      - "${PORT:-18080}:8080"
     volumes:
       - keylane-data:/data
 

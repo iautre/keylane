@@ -48,7 +48,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Open `http://localhost:8080`. SQLite is stored in the persistent Docker volume `keylane-data`.
+Open `http://localhost:18080`. Set `PORT` in `.env` to change the host port. SQLite is stored in the persistent Docker volume `keylane-data`.
 
 The Compose file pulls the CNB artifact `docker.cnb.cool/autre/keylane:latest`. CNB also publishes each build as a numbered beta tag, such as `beta00001`; set `KEYLANE_IMAGE=docker.cnb.cool/autre/keylane:beta00001` in `.env` to pin a specific beta.
 
