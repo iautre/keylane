@@ -6,8 +6,12 @@ services:
     env_file: .env
     environment:
       DATABASE_ENABLED: "false"
+      DATABASE_PATH: /data/keylane.db
       HTTP_SERVER_ADDR: ":8080"
     ports:
       - "${PORT:-8080}:8080"
     volumes:
-      - ./data:/data
+      - keylane-data:/data
+
+volumes:
+  keylane-data:
