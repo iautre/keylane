@@ -48,9 +48,9 @@ docker compose pull
 docker compose up -d
 ```
 
-Open `http://localhost:18080`. Set `PORT` in `.env` to change the host port. SQLite is stored in the persistent Docker volume `keylane-data`.
+Open `http://localhost:18080`. Set `PORT` in `.env` to change the host port. SQLite is stored in the `./data` directory next to `docker-compose.yml`; keep this directory when recreating the container.
 
-The Compose file pulls the CNB artifact `docker.cnb.cool/autre/keylane:latest`. CNB also publishes each build as a numbered beta tag, such as `beta00001`; set `KEYLANE_IMAGE=docker.cnb.cool/autre/keylane:beta00001` in `.env` to pin a specific beta.
+The Compose file pulls the CNB artifact `docker.cnb.cool/autre/keylane:latest`. Every push to `main` overwrites `latest`; point `KEYLANE_IMAGE` in `.env` to another registry or tag only if you need to pin a specific build.
 
 ## Routing
 
@@ -66,7 +66,7 @@ Latency selection is an estimate based on recent observations, not a guarantee a
 ## Security and operation
 
 - Keep the service on a private network or behind HTTPS when accessed remotely.
-- The dashboard uses `ADMIN_PASSWORD`; downstream clients use `GATEWAY_API_KEY`.
+- The dashboard uses `ADMIN_PASSWORD`; downstream clients authenticate with a gateway API key. The initial key comes from `GATEWAY_API_KEY`, and you can create/revoke more keys under the **本地调用** tab. Each created key is shown only once, so copy it when created.
 - Provider API keys are encrypted in SQLite using `ENCRYPTION_SECRET`. Back up the database and encryption secret together.
 - Prompt and completion bodies are not written to request history.
 
@@ -77,8 +77,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local build steps and contribution gu
 
 ## Docker image publishing
 
-GitHub Actions builds multi-architecture images for `linux/amd64` and `linux/arm64` on pushes to `main`. Pull requests build the image without publishing it. Published beta images use a five-digit, zero-padded GitHub Actions run number, for example `iautre/keylane:beta00001`.
+Both GitHub Actions and CNB build multi-architecture images for `linux/amd64` and `linux/arm64` on pushes to `main`, and publish them as `latest`. Pull requests on GitHub build the image without publishing it.
 
-Before the first push to `main`, add a Docker Hub access token as the repository Actions secret `DOCKERHUB_TOKEN`. Images are published to `docker.io/iautre/keylane`.
-
-CNB builds multi-architecture images for `linux/amd64` and `linux/arm64` on pushes to `main`, publishing both a numbered beta tag (from the main-branch commit count) and `latest` to its same-name Docker artifact at `${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}`. The CNB Docker service handles authentication to its artifact registry. GitHub Actions publishes numbered beta tags to Docker Hub independently.
+Before the first push to `main`, add a Docker Hub access token as the repository Actions secret `DOCKERHUB_TOKEN`. GitHub publishes `docker.io/iautre/keylane:latest`. CNB publishes its same-name artifact at `${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}:latest`; the CNB Docker service handles registry authentication.

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,6 +82,13 @@ type requestEvent struct {
 	MetricFailures int64
 }
 
+type GatewayKey struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Prefix    string `json:"prefix"`
+	CreatedAt string `json:"created_at"`
+}
+
 type Service struct {
 	db                    *sql.DB
 	adminPassword         string
@@ -95,6 +103,7 @@ type Service struct {
 	probeCancel           context.CancelFunc
 	accounts              map[string]Account
 	pools                 map[string]Pool
+	apiKeyHashes          map[string]struct{}
 	metricQueue           chan requestEvent
 	requestQueue          chan requestEvent
 	probeLast             map[string]time.Time
@@ -165,7 +174,7 @@ func New(path, adminPassword, clientKey, encryptionSecret string) (*Service, err
 			IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
 			ExpectContinueTimeout: time.Second,
 		}},
-		accounts: make(map[string]Account), pools: make(map[string]Pool),
+		accounts: make(map[string]Account), pools: make(map[string]Pool), apiKeyHashes: make(map[string]struct{}),
 		metricQueue: make(chan requestEvent, queueSize), requestQueue: make(chan requestEvent, queueSize), probeLast: make(map[string]time.Time),
 		probeInterval:         time.Duration(envInt("PROBE_INTERVAL_SECONDS", defaultProbeInterval, 0, 86400)) * time.Second,
 		probeTimeout:          time.Duration(envInt("PROBE_TIMEOUT_SECONDS", 20, 1, 300)) * time.Second,
@@ -206,6 +215,10 @@ CREATE TABLE IF NOT EXISTS request_events (
  error_type TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_request_events_at ON request_events(at DESC);
+CREATE TABLE IF NOT EXISTS gateway_api_keys (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, key_prefix TEXT NOT NULL,
+ key_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+);
 `
 	tx, err := db.Begin()
 	if err != nil {
@@ -351,6 +364,9 @@ func (s *Service) Register(r *gin.Engine) {
 	admin.PUT("/accounts/:id", s.updateAccount)
 	admin.DELETE("/accounts/:id", s.deleteAccount)
 	admin.POST("/accounts/:id/probe", s.probeOne)
+	admin.GET("/api-keys", s.listGatewayKeys)
+	admin.POST("/api-keys", s.createGatewayKey)
+	admin.DELETE("/api-keys/:id", s.deleteGatewayKey)
 	admin.GET("/model-pools", s.listPools)
 	admin.PUT("/model-pools", s.updatePool)
 	admin.GET("/requests", s.listRequests)
@@ -375,7 +391,15 @@ func (s *Service) adminAuth() gin.HandlerFunc {
 
 func (s *Service) gatewayAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !constantEqual(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "), s.clientKey) {
+		provided := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		valid := s.clientKey != "" && constantEqual(provided, s.clientKey)
+		if !valid && provided != "" {
+			hash := sha256.Sum256([]byte(provided))
+			s.mu.RLock()
+			_, valid = s.apiKeyHashes[hex.EncodeToString(hash[:])]
+			s.mu.RUnlock()
+		}
+		if !valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key"})
 			return
 		}
@@ -431,8 +455,26 @@ func (s *Service) reload() error {
 		return err
 	}
 	poolRows.Close()
+	keyRows, err := s.db.Query(`SELECT key_hash FROM gateway_api_keys`)
+	if err != nil {
+		return err
+	}
+	apiKeyHashes := make(map[string]struct{})
+	for keyRows.Next() {
+		var keyHash string
+		if err := keyRows.Scan(&keyHash); err != nil {
+			keyRows.Close()
+			return err
+		}
+		apiKeyHashes[keyHash] = struct{}{}
+	}
+	if err := keyRows.Err(); err != nil {
+		keyRows.Close()
+		return err
+	}
+	keyRows.Close()
 	s.mu.Lock()
-	s.accounts, s.pools = accounts, pools
+	s.accounts, s.pools, s.apiKeyHashes = accounts, pools, apiKeyHashes
 	s.mu.Unlock()
 	return nil
 }
@@ -485,6 +527,84 @@ func (s *Service) listAccounts(c *gin.Context) {
 		return list[i].PublicModel < list[j].PublicModel
 	})
 	c.JSON(http.StatusOK, gin.H{"data": list})
+}
+
+func (s *Service) listGatewayKeys(c *gin.Context) {
+	rows, err := s.db.Query(`SELECT id,name,key_prefix,created_at FROM gateway_api_keys ORDER BY created_at DESC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "API key list unavailable"})
+		return
+	}
+	defer rows.Close()
+	keys := make([]GatewayKey, 0)
+	for rows.Next() {
+		var key GatewayKey
+		if err := rows.Scan(&key.ID, &key.Name, &key.Prefix, &key.CreatedAt); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "API key list unavailable"})
+			return
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "API key list unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": keys})
+}
+
+func (s *Service) createGatewayKey(c *gin.Context) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" || len(in.Name) > 80 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name must be between 1 and 80 characters"})
+		return
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not generate API key"})
+		return
+	}
+	secret := "kl_" + base64.RawURLEncoding.EncodeToString(raw)
+	prefix := secret[:11]
+	digest := sha256.Sum256([]byte(secret))
+	keyHash := hex.EncodeToString(digest[:])
+	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+	id := randomID()
+	if _, err := s.db.Exec(`INSERT INTO gateway_api_keys(id,name,key_prefix,key_hash,created_at) VALUES(?,?,?,?,?)`, id, in.Name, prefix, keyHash, createdAt); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save API key"})
+		return
+	}
+	s.mu.Lock()
+	s.apiKeyHashes[keyHash] = struct{}{}
+	s.mu.Unlock()
+	c.JSON(http.StatusCreated, gin.H{"data": GatewayKey{ID: id, Name: in.Name, Prefix: prefix, CreatedAt: createdAt}, "key": secret})
+}
+
+func (s *Service) deleteGatewayKey(c *gin.Context) {
+	id := c.Param("id")
+	var keyHash string
+	if err := s.db.QueryRow(`SELECT key_hash FROM gateway_api_keys WHERE id=?`, id).Scan(&keyHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "API key not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not find API key"})
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM gateway_api_keys WHERE id=?`, id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete API key"})
+		return
+	}
+	s.mu.Lock()
+	delete(s.apiKeyHashes, keyHash)
+	s.mu.Unlock()
+	c.Status(http.StatusNoContent)
 }
 
 func (s *Service) createAccount(c *gin.Context) {
