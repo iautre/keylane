@@ -5,7 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 type Account = { id: string; name: string; base_url: string; public_model: string; upstream_model: string; enabled: boolean; priority: number; api_key_set: boolean; ttft_ewma_ms: number; total_ewma_ms: number; samples: number; successes: number; failures: number; consecutive_failures: number; cooldown_until?: string; last_error?: string }
 type Pool = { public_model: string; strategy: string; timeout_ms: number; request_timeout_ms: number; max_attempts: number; failure_threshold: number; cooldown_seconds: number; probe_interval_seconds: number }
 type RequestItem = { at: string; model: string; account: string; status: number; ttft_ms: number; total_ms: number; attempts: number; error_type: string; error: string }
-type GatewayKey = { id: string; name: string; prefix: string; created_at: string }
+type GatewayKey = { id: string; name: string; prefix: string; key?: string; created_at: string }
 
 const adminPassword = ref(sessionStorage.getItem('keylane-admin') || '')
 const signedIn = ref(false)
@@ -25,6 +25,8 @@ const showCreateKey = ref(false)
 const creatingKey = ref(false)
 const apiKeyName = ref('')
 const createdApiKey = ref('')
+const revealedKeys = ref<Set<string>>(new Set())
+const createdKeyVisible = ref(false)
 const models = computed(() => [...new Set(accounts.value.map(a => a.public_model))].sort())
 const apiBaseURL = computed(() => `${window.location.origin}/v1`)
 const callExample = computed(() => [
@@ -101,6 +103,18 @@ async function createGatewayKey() {
   finally { creatingKey.value = false }
 }
 
+function toggleKeyVisible(id: string) {
+  const next = new Set(revealedKeys.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  revealedKeys.value = next
+}
+
+async function copyGatewayKey(k: GatewayKey) {
+  if (!k.key) { ElMessage.warning('这个密钥由旧版本创建，无法还原，请撤销后重新创建'); return }
+  await copyText(k.key, 'API Key')
+}
+
 async function copyCreatedKey() {
   try { await navigator.clipboard.writeText(createdApiKey.value); ElMessage.success('API Key 已复制') }
   catch { ElMessage.warning('复制失败，请手动复制密钥') }
@@ -165,13 +179,13 @@ onMounted(() => { if (adminPassword.value) loadAll() })
           <el-empty v-if="!pools.length" description="添加账号后会自动创建模型池" />
         </template>
         <template v-else-if="tab==='client'">
-          <div class="page-heading"><div><p class="eyebrow">LOCAL ACCESS</p><h1>本地调用</h1><p class="muted">用这里的地址和密钥调用网关，网关负责在多个上游账号间自动选路。</p></div><el-button type="primary" @click="showCreateKey=true;createdApiKey=''">＋ 创建 API Key</el-button></div>
+          <div class="page-heading"><div><p class="eyebrow">LOCAL ACCESS</p><h1>本地调用</h1><p class="muted">用这里的地址和密钥调用网关，网关负责在多个上游账号间自动选路。</p></div><el-button type="primary" @click="showCreateKey=true;createdApiKey='';createdKeyVisible=false">＋ 创建 API Key</el-button></div>
           <section class="panel"><div class="panel-heading"><div><h2>调用地址</h2><p>把客户端的 Base URL 填成下面这个地址，路径保持 OpenAI 兼容格式。</p></div><el-button text @click="copyText(apiBaseURL, '调用地址')">复制地址</el-button></div>
             <div class="call-block"><div class="call-row"><span class="call-label">Base URL</span><code class="call-value">{{ apiBaseURL }}</code></div><div class="call-row"><span class="call-label">可用模型</span><span class="call-value"><code v-for="m in models" :key="m">{{ m }}</code><span v-if="!models.length" class="dim">添加上游账号后自动生成</span></span></div><div class="call-row"><span class="call-label">鉴权头</span><code class="call-value">Authorization: Bearer &lt;你的 API Key&gt;</code></div></div>
             <div class="example-head"><span>curl 示例</span><el-button text size="small" @click="copyText(callExample, '调用示例')">复制示例</el-button></div><pre class="code-block">{{ callExample }}</pre>
             <p class="dialog-hint">在 NAS 之外的设备调用时，把地址里的主机名换成 NAS 的局域网 IP 或域名，并确保端口可访问。</p>
           </section>
-          <section class="panel"><div class="panel-heading"><div><h2>本地 API Key</h2><p>在这里创建的密钥用于本机客户端调用。环境变量 GATEWAY_API_KEY 里的初始密钥也一直有效。</p></div></div><div v-if="gatewayKeys.length" class="table-wrap"><table><thead><tr><th>备注名称</th><th>密钥前缀</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="k in gatewayKeys" :key="k.id"><td><b>{{ k.name }}</b></td><td><code>{{ k.prefix }}…</code></td><td>{{ ago(k.created_at) }}</td><td><el-button link type="danger" @click="deleteGatewayKey(k)">撤销</el-button></td></tr></tbody></table></div><el-empty v-else description="还没有创建 API Key，点右上角创建" /></section>
+          <section class="panel"><div class="panel-heading"><div><h2>本地 API Key</h2><p>在这里创建的密钥用于本机客户端调用。环境变量 GATEWAY_API_KEY 里的初始密钥也一直有效。</p></div></div><div v-if="gatewayKeys.length" class="table-wrap"><table><thead><tr><th>备注名称</th><th>密钥</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="k in gatewayKeys" :key="k.id"><td><b>{{ k.name }}</b></td><td><div class="key-cell"><code class="key-text">{{ revealedKeys.has(k.id) && k.key ? k.key : k.prefix + '…' }}</code><el-button link class="eye-btn" :title="revealedKeys.has(k.id) ? '隐藏' : '显示'" @click="toggleKeyVisible(k.id)">{{ revealedKeys.has(k.id) ? '◌' : '◉' }}</el-button><el-button link class="eye-btn" title="复制密钥" @click="copyGatewayKey(k)">⧉</el-button></div><small v-if="!k.key" class="error-small">旧版本密钥，无法还原，请撤销重建</small></td><td>{{ ago(k.created_at) }}</td><td><el-button link type="danger" @click="deleteGatewayKey(k)">撤销</el-button></td></tr></tbody></table></div><el-empty v-else description="还没有创建 API Key，点右上角创建" /></section>
         </template>
         <template v-else>
           <div class="page-heading"><div><p class="eyebrow">REQUESTS</p><h1>请求记录</h1><p class="muted">最近 100 条元数据记录，不含请求与响应正文。</p></div></div>
@@ -188,8 +202,8 @@ onMounted(() => { if (adminPassword.value) loadAll() })
     <el-dialog v-model="showCreateKey" title="创建本地 API Key" width="520px" destroy-on-close>
       <p class="dialog-hint">创建一个给本机客户端使用的密钥。生成后请立即复制，关闭后不再显示完整密钥。</p>
       <el-form label-position="top" @submit.prevent="createGatewayKey"><el-form-item label="备注名称"><el-input v-model="apiKeyName" placeholder="例如：本机 Claude Code" maxlength="80" @keyup.enter="createGatewayKey" /></el-form-item></el-form>
-      <div v-if="createdApiKey" class="key-result"><p class="muted">创建成功，复制下面的密钥保存到本地客户端：</p><el-input :model-value="createdApiKey" readonly><template #append><el-button @click="copyCreatedKey">复制</el-button></template></el-input></div>
-      <template #footer><el-button @click="showCreateKey=false;createdApiKey=''">{{ createdApiKey ? '完成' : '取消' }}</el-button><el-button v-if="!createdApiKey" type="primary" :loading="creatingKey" @click="createGatewayKey">创建</el-button></template>
+      <div v-if="createdApiKey" class="key-result"><p class="muted">创建成功，复制下面的密钥保存到本地客户端：</p><el-input :model-value="createdApiKey" :type="createdKeyVisible ? 'text' : 'password'" readonly><template #prefix><el-button link class="eye-btn" :title="createdKeyVisible ? '隐藏' : '显示'" @click="createdKeyVisible=!createdKeyVisible">{{ createdKeyVisible ? '◌' : '◉' }}</el-button></template><template #append><el-button @click="copyCreatedKey">复制</el-button></template></el-input></div>
+      <template #footer><el-button @click="showCreateKey=false;createdApiKey='';createdKeyVisible=false">{{ createdApiKey ? '完成' : '取消' }}</el-button><el-button v-if="!createdApiKey" type="primary" :loading="creatingKey" @click="createGatewayKey">创建</el-button></template>
     </el-dialog>
   </div>
 </template>

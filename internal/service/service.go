@@ -86,6 +86,7 @@ type GatewayKey struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Prefix    string `json:"prefix"`
+	Key       string `json:"key,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 
@@ -217,7 +218,7 @@ CREATE TABLE IF NOT EXISTS request_events (
 CREATE INDEX IF NOT EXISTS idx_request_events_at ON request_events(at DESC);
 CREATE TABLE IF NOT EXISTS gateway_api_keys (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, key_prefix TEXT NOT NULL,
- key_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+ key_hash TEXT NOT NULL UNIQUE, key_enc TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 `
 	tx, err := db.Begin()
@@ -265,6 +266,38 @@ CREATE TABLE IF NOT EXISTS gateway_api_keys (
 	}
 	if !hasRequestTimeout {
 		if _, err := db.Exec(`ALTER TABLE pools ADD COLUMN request_timeout_ms INTEGER NOT NULL DEFAULT 600000`); err != nil {
+			return err
+		}
+	}
+	// Older releases stored only a hash for gateway API keys, so the full
+	// secret could not be shown again. Add an encrypted copy for keys created
+	// from this version on; pre-existing keys keep an empty key_enc.
+	keyCols, err := db.Query(`PRAGMA table_info(gateway_api_keys)`)
+	if err != nil {
+		return err
+	}
+	hasKeyEnc := false
+	for keyCols.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := keyCols.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			keyCols.Close()
+			return err
+		}
+		if name == "key_enc" {
+			hasKeyEnc = true
+		}
+	}
+	if err := keyCols.Err(); err != nil {
+		keyCols.Close()
+		return err
+	}
+	if err := keyCols.Close(); err != nil {
+		return err
+	}
+	if !hasKeyEnc {
+		if _, err := db.Exec(`ALTER TABLE gateway_api_keys ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -535,7 +568,7 @@ func (s *Service) listAccounts(c *gin.Context) {
 }
 
 func (s *Service) listGatewayKeys(c *gin.Context) {
-	rows, err := s.db.Query(`SELECT id,name,key_prefix,created_at FROM gateway_api_keys ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT id,name,key_prefix,key_enc,created_at FROM gateway_api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "API key list unavailable"})
 		return
@@ -544,9 +577,17 @@ func (s *Service) listGatewayKeys(c *gin.Context) {
 	keys := make([]GatewayKey, 0)
 	for rows.Next() {
 		var key GatewayKey
-		if err := rows.Scan(&key.ID, &key.Name, &key.Prefix, &key.CreatedAt); err != nil {
+		var enc string
+		if err := rows.Scan(&key.ID, &key.Name, &key.Prefix, &enc, &key.CreatedAt); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "API key list unavailable"})
 			return
+		}
+		// Keys created by older releases have no encrypted copy; expose only
+		// the prefix for those so the UI can tell the user to recreate them.
+		if enc != "" {
+			if plain, err := s.decrypt(enc); err == nil {
+				key.Key = plain
+			}
 		}
 		keys = append(keys, key)
 	}
@@ -579,9 +620,14 @@ func (s *Service) createGatewayKey(c *gin.Context) {
 	prefix := secret[:11]
 	digest := sha256.Sum256([]byte(secret))
 	keyHash := hex.EncodeToString(digest[:])
+	keyEnc, err := s.encrypt(secret)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not encrypt API key"})
+		return
+	}
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 	id := randomID()
-	if _, err := s.db.Exec(`INSERT INTO gateway_api_keys(id,name,key_prefix,key_hash,created_at) VALUES(?,?,?,?,?)`, id, in.Name, prefix, keyHash, createdAt); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO gateway_api_keys(id,name,key_prefix,key_hash,key_enc,created_at) VALUES(?,?,?,?,?,?)`, id, in.Name, prefix, keyHash, keyEnc, createdAt); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save API key"})
 		return
 	}
