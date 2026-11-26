@@ -268,6 +268,11 @@ CREATE TABLE IF NOT EXISTS gateway_api_keys (
 			return err
 		}
 	}
+	// One-time cleanup for pools orphaned by earlier versions (renamed or
+	// deleted accounts left their old model pool behind).
+	if _, err := db.Exec(`DELETE FROM pools WHERE public_model NOT IN (SELECT DISTINCT public_model FROM accounts)`); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -697,6 +702,9 @@ func (s *Service) updateAccount(c *gin.Context) {
 		return
 	}
 	_, _ = s.db.Exec(`INSERT OR IGNORE INTO pools(public_model,strategy,timeout_ms,request_timeout_ms,max_attempts,failure_threshold,cooldown_seconds,probe_interval_seconds) VALUES(?,?,?,?,?,?,?,?)`, in.PublicModel, "fastest", int(s.defaultTimeout.Milliseconds()), int(s.defaultRequestTimeout.Milliseconds()), s.defaultAttempts, s.defaultFailure, s.defaultCooldown, int(s.probeInterval.Seconds()))
+	// The account may have moved to a different public model. Drop pools that
+	// are no longer referenced by any account so /v1/models stays accurate.
+	s.cleanupOrphanPools()
 	if err := s.reload(); err != nil {
 		c.JSON(500, gin.H{"error": "runtime reload failed"})
 		return
@@ -710,8 +718,16 @@ func (s *Service) deleteAccount(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "could not delete account"})
 		return
 	}
+	s.cleanupOrphanPools()
 	_ = s.reload()
 	c.Status(204)
+}
+
+// cleanupOrphanPools removes model pools that no account references anymore.
+// A pool becomes orphaned when an account is deleted or its public model is
+// renamed; leaving it behind exposes an unusable model in /v1/models.
+func (s *Service) cleanupOrphanPools() {
+	_, _ = s.db.Exec(`DELETE FROM pools WHERE public_model NOT IN (SELECT DISTINCT public_model FROM accounts)`)
 }
 
 func (s *Service) listPools(c *gin.Context) {
