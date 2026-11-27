@@ -5,6 +5,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 type Account = { id: string; name: string; base_url: string; public_model: string; upstream_model: string; enabled: boolean; priority: number; api_key_set: boolean; ttft_ewma_ms: number; total_ewma_ms: number; samples: number; successes: number; failures: number; consecutive_failures: number; cooldown_until?: string; last_error?: string }
 type Pool = { public_model: string; strategy: string; timeout_ms: number; request_timeout_ms: number; max_attempts: number; failure_threshold: number; cooldown_seconds: number; probe_interval_seconds: number }
 type RequestItem = { at: string; model: string; account: string; status: number; ttft_ms: number; total_ms: number; attempts: number; error_type: string; error: string }
+type ProbeOutcome = { ok: boolean; status: number; ttft_ms: number; total_ms: number; error_type: string; error: string }
+type ProbeState = { phase: 'idle' | 'probing' | 'done'; outcome?: ProbeOutcome; at?: number }
 type GatewayKey = { id: string; name: string; prefix: string; key?: string; created_at: string }
 
 const adminPassword = ref(sessionStorage.getItem('keylane-admin') || '')
@@ -27,6 +29,7 @@ const apiKeyName = ref('')
 const createdApiKey = ref('')
 const revealedKeys = ref<Set<string>>(new Set())
 const createdKeyVisible = ref(false)
+const probeStates = ref<Record<string, ProbeState>>({})
 const models = computed(() => [...new Set(accounts.value.map(a => a.public_model))].sort())
 const apiBaseURL = computed(() => `${window.location.origin}/v1`)
 const callExample = computed(() => [
@@ -136,7 +139,24 @@ async function deleteGatewayKey(key: GatewayKey) {
 async function toggleAccount(a: Account) { await api(`/admin/api/accounts/${a.id}`, { method: 'PUT', body: JSON.stringify({ enabled: !a.enabled }) }); await loadAll() }
 async function savePriority(a: Account) { try { await api(`/admin/api/accounts/${a.id}`, { method: 'PUT', body: JSON.stringify({ priority: a.priority }) }); ElMessage.success('账号顺序已保存'); await loadAll() } catch (e) { error.value = e instanceof Error ? e.message : '保存失败' } }
 async function deleteAccount(a: Account) { try { await ElMessageBox.confirm(`删除账号“${a.name}”？`, '确认操作', { type: 'warning' }); await api(`/admin/api/accounts/${a.id}`, { method: 'DELETE' }); await loadAll() } catch {} }
-async function probe(a: Account) { try { await api(`/admin/api/accounts/${a.id}/probe`, { method: 'POST' }); ElMessage.success('测速任务已排队'); } catch (e) { error.value = e instanceof Error ? e.message : '测速失败' } }
+function probeState(id: string): ProbeState { return probeStates.value[id] || { phase: 'idle' } }
+function setProbeState(id: string, state: ProbeState) { probeStates.value = { ...probeStates.value, [id]: state } }
+
+async function probe(a: Account) {
+  if (probeState(a.id).phase === 'probing') return
+  setProbeState(a.id, { phase: 'probing' })
+  try {
+    const result = await api<{ data: ProbeOutcome }>(`/admin/api/accounts/${a.id}/probe`, { method: 'POST' })
+    const outcome = result.data
+    setProbeState(a.id, { phase: 'done', outcome, at: Date.now() })
+    if (outcome.ok) ElMessage.success(`测速完成：首字 ${fmt(outcome.ttft_ms)}，完整 ${fmt(outcome.total_ms)}`)
+    else ElMessage.warning(`测速未成功：${outcome.error_type || outcome.error || '未知错误'}`)
+  } catch (e) {
+    const outcome: ProbeOutcome = { ok: false, status: 0, ttft_ms: 0, total_ms: 0, error_type: 'request_failed', error: e instanceof Error ? e.message : '测速失败' }
+    setProbeState(a.id, { phase: 'done', outcome, at: Date.now() })
+    error.value = outcome.error
+  }
+}
 async function savePool(p: Pool) { try { await api('/admin/api/model-pools', { method: 'PUT', body: JSON.stringify(p) }); ElMessage.success(`${p.public_model} 策略已保存`); await loadAll() } catch (e) { error.value = e instanceof Error ? e.message : '保存失败' } }
 function logout() { signedIn.value = false; adminPassword.value = ''; sessionStorage.removeItem('keylane-admin') }
 function fmt(ms: number) { return ms > 0 ? `${Math.round(ms)} ms` : '—' }
@@ -171,7 +191,7 @@ onMounted(() => { if (adminPassword.value) loadAll() })
         </template>
         <template v-else-if="tab==='accounts'">
           <div class="page-heading"><div><p class="eyebrow">UPSTREAMS</p><h1>上游账号</h1><p class="muted">同一公开模型可加入多个 API Key 账号，网关按模型池策略选路。</p></div><el-button type="primary" @click="openAddAccount()">＋ 添加账号</el-button></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>账号</th><th>公开模型</th><th>上游模型</th><th>状态</th><th>首包延迟</th><th>完整耗时</th><th>样本</th><th>顺序优先级</th><th>操作</th></tr></thead><tbody><tr v-for="a in accounts" :key="a.id"><td><b>{{ a.name }}</b><small>{{ a.base_url }}</small></td><td><code>{{ a.public_model }}</code></td><td><code>{{ a.upstream_model }}</code></td><td><span class="badge" :class="a.enabled ? (a.cooldown_until && Date.parse(a.cooldown_until)>Date.now()?'warn':'ok'):'off'">{{ !a.enabled?'已停用':a.cooldown_until && Date.parse(a.cooldown_until)>Date.now()?'冷却中':'可用' }}</span></td><td>{{ fmt(a.ttft_ewma_ms) }}</td><td>{{ fmt(a.total_ewma_ms) }}</td><td>{{ a.samples }}</td><td><el-input-number v-model="a.priority" :min="1" :max="9999" size="small" @change="savePriority(a)" /></td><td><div class="actions"><el-button link type="primary" @click="openEditAccount(a)">编辑</el-button><el-button link type="primary" @click="probe(a)">测速</el-button><el-button link @click="toggleAccount(a)">{{ a.enabled?'停用':'启用' }}</el-button><el-button link type="danger" @click="deleteAccount(a)">删除</el-button></div></td></tr></tbody></table></div><el-empty v-if="!accounts.length" description="还没有上游账号" /></section>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>账号</th><th>公开模型</th><th>上游模型</th><th>状态</th><th>首包延迟</th><th>完整耗时</th><th>样本</th><th>顺序优先级</th><th>操作</th></tr></thead><tbody><tr v-for="a in accounts" :key="a.id"><td><b>{{ a.name }}</b><small>{{ a.base_url }}</small></td><td><code>{{ a.public_model }}</code></td><td><code>{{ a.upstream_model }}</code></td><td><span class="badge" :class="a.enabled ? (a.cooldown_until && Date.parse(a.cooldown_until)>Date.now()?'warn':'ok'):'off'">{{ !a.enabled?'已停用':a.cooldown_until && Date.parse(a.cooldown_until)>Date.now()?'冷却中':'可用' }}</span></td><td>{{ fmt(a.ttft_ewma_ms) }}</td><td>{{ fmt(a.total_ewma_ms) }}</td><td>{{ a.samples }}</td><td><el-input-number v-model="a.priority" :min="1" :max="9999" size="small" @change="savePriority(a)" /></td><td><div class="actions"><el-button link type="primary" @click="openEditAccount(a)">编辑</el-button><el-button link class="probe-btn" :class="probeState(a.id).phase==='probing'?'probing':probeState(a.id).outcome?(probeState(a.id).outcome!.ok?'ok':'bad'):''" :disabled="probeState(a.id).phase==='probing'" @click="probe(a)"><span class="probe-icon">{{ probeState(a.id).phase==='probing'?'◌':probeState(a.id).phase==='done'?(probeState(a.id).outcome!.ok?'✓':'✗'):'◈' }}</span><span v-if="probeState(a.id).phase==='probing'">测速中</span><span v-else-if="probeState(a.id).phase==='done' && probeState(a.id).outcome" :title="probeState(a.id).outcome!.ok?`首字 ${fmt(probeState(a.id).outcome!.ttft_ms)} · 完整 ${fmt(probeState(a.id).outcome!.total_ms)}`:probeState(a.id).outcome!.error">{{ probeState(a.id).outcome!.ok?fmt(probeState(a.id).outcome!.ttft_ms):(probeState(a.id).outcome!.error_type||'失败') }}</span><span v-else>测速</span></el-button><el-button link @click="toggleAccount(a)">{{ a.enabled?'停用':'启用' }}</el-button><el-button link type="danger" @click="deleteAccount(a)">删除</el-button></div></td></tr></tbody></table></div><el-empty v-if="!accounts.length" description="还没有上游账号" /></section>
         </template>
         <template v-else-if="tab==='pools'">
           <div class="page-heading"><div><p class="eyebrow">ROUTING</p><h1>模型路由</h1><p class="muted">每个公开模型独立配置自动择优或按账号优先级顺序切换。</p></div></div>

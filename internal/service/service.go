@@ -869,17 +869,22 @@ func (s *Service) listRequests(c *gin.Context) {
 	c.JSON(200, gin.H{"data": items})
 }
 
+// probeOne runs a live probe in the request context and returns the measured
+// result. Unlike the background scheduler it does not wait for the gateway to
+// be idle: it is a small, non-routing request explicitly requested by the
+// operator, and it uses the UI's own timeout via runProbe.
 func (s *Service) probeOne(c *gin.Context) {
 	a, ok := s.account(c.Param("id"))
 	if !ok {
 		c.JSON(404, gin.H{"error": "account not found"})
 		return
 	}
-	if !s.startProbe(context.Background(), a) {
-		c.JSON(http.StatusConflict, gin.H{"error": "probe waits until the gateway is idle"})
+	out := s.runProbe(c.Request.Context(), a)
+	if c.Request.Context().Err() != nil {
 		return
 	}
-	c.JSON(202, gin.H{"status": "queued"})
+	s.recordProbe(a, out)
+	c.JSON(200, gin.H{"data": out})
 }
 
 func (s *Service) account(id string) (Account, bool) {
